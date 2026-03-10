@@ -36,6 +36,9 @@ EXCLUDE EXPLICITLY.    A good root cause also explains what it is NOT, and why.
 READ THE MEMORY.       ASCII strings, pool tags, and embedded paths in raw memory are
                        direct fingerprints — they can identify the guilty driver even
                        when all other evidence is ambiguous or symbols are missing.
+EXPLAIN LIKE A HUMAN.  Every final conclusion must include a plain-language version that
+                       a non-debugger reader can understand without knowing IRP, DPC,
+                       oplock, ERESOURCE, or minifilter internals.
 ```
 
 ---
@@ -683,11 +686,83 @@ Convergence      : <收斂到同一根因的信心度 + 說明>
 
 **這是最重要的輸出。必須完整、清楚、有因果鏈，且必須說明排除了哪些可能性。**
 
+### 8-0. 白話版故障故事（Plain-Language Fault Story）
+
+在進入技術結論前，**必須先輸出一段給一般工程師 / PM / 支援窗口看的直白說明**。
+
+目的不是取代技術分析，而是把技術分析翻譯成「人能一眼看懂的故障故事」。
+
+#### 輸出要求
+
+必須回答以下 4 個問題：
+
+1. 這個 dump 是「原始故障」還是「故障後留下的現場」？
+2. 系統到底是「當掉」、「忙死」、「互鎖」，還是「被人為強制中止」？
+3. 最可疑的元件是誰？它做了什麼事把系統拖住？
+4. 為什麼不是其他常見方向，例如 power、DPC、ISR、純 storage timeout？
+
+#### 白話版寫作規則
+
+- 禁止一開頭就丟 bugcheck code、stack function、driver 名稱縮寫而不解釋
+- 先講「現象」與「結果」，再講技術細節
+- 盡量用「像塞車」、「排隊」、「有人拿著鎖不放」、「系統一直等磁碟」這種具象說法
+- 每一個術語第一次出現都要立刻翻成白話
+  - `IRP` → I/O 請求 / 一筆磁碟工作
+  - `ERESOURCE` / `mutex` → 鎖
+  - `oplock` → 檔案協調鎖 / 檔案使用權協調機制
+  - `minifilter` → 檔案過濾驅動 / 安全掃描或監控層
+- 白話版要敢下結論，但必須保留信心邊界
+  - 可說：「高度懷疑」「幾乎可以確定」
+  - 不可說成 100% 已證明，除非證據鏈真的封閉
+
+#### 建議格式
+
+```
+[PLAIN-LANGUAGE SUMMARY]
+這不是系統自己藍屏，而是系統先卡死，之後有人長按電源鍵把它關掉。
+
+真正的問題是：<一句話說明最核心故障，例如「系統碟上的檔案 I/O 被安全元件拖慢」>。
+
+白話來說：
+- <誰在做事>
+- <卡在哪裡>
+- <怎麼影響其他元件>
+- <最後為什麼整機無回應>
+
+不是以下情況：
+- <排除方向 #1>
+- <排除方向 #2>
+```
+
+#### 強制對照輸出
+
+白話版之後，**必須緊接著輸出技術版對照**，格式如下：
+
+```
+[PLAIN → TECH MAPPING]
+「系統先卡死，之後才被長按電源鍵」
+  → bugcheck `0x1C8 MANUALLY_INITIATED_POWER_BUTTON_HOLD`
+
+「安全元件正在盯檔案，導致其他程式等磁碟」
+  → <thread / IRP / fileobj / fltkd 的具體證據>
+
+「不是 power transition 卡死」
+  → `!poaction` 顯示 `State: 0 - Idle`, `Action: None`
+```
+
 ### 8-A. One-Sentence Root Cause
 
 ```
 [EN]  <一句話說明根因：[Driver/Component] caused [mechanism] which led to [outcome]>
 [ZH]  <一句話說明根因（繁體中文）>
+```
+
+> **強制要求：** 8-A 的一句話根因之後，必須再補一個「白話一句話版本」。
+
+格式：
+
+```
+[ZH-PLAIN] <讓非 debugger 讀者 10 秒內理解的版本>
 ```
 
 ### 8-B. Cause → Effect Chain（簡短版）
@@ -698,6 +773,19 @@ Convergence      : <收斂到同一根因的信心度 + 說明>
     → [蔓延] <N threads blocked / scheduler starved>
       → [最終症狀] <system hang / crash>
         → [Recovery 失敗] <why watchdog didn't save it>
+```
+
+> **補充要求：** 在 8-B 之後，必須再輸出一個「白話因果鏈」，只保留 4 到 6 個節點。
+
+格式：
+
+```
+[白話因果鏈]
+<元件/行為> 
+  → <卡住的資源或檔案>
+    → <其他 thread / service 一起被拖住>
+      → <使用者看到系統無回應>
+        → <最後怎麼產生 dump>
 ```
 
 ### 8-C. Cause → Effect Chain（詳細版）
@@ -732,6 +820,15 @@ Convergence      : <收斂到同一根因的信心度 + 說明>
 #2 <假設描述> — 排除原因：<具體證據顯示這個方向不成立>
 ```
 
+> **補充要求：** 每個排除假設都必須加一行白話翻譯。
+
+格式：
+
+```
+#1 <技術假設> — 排除原因：<技術證據>
+  白話：<例如「不是睡眠/喚醒卡住，因為系統當時根本沒有在做電源切換」>
+```
+
 ### 8-E. 信心分數
 
 ```
@@ -746,6 +843,25 @@ Gaps       : <如果有哪些資訊缺失，獲得後信心分數會提升到多
 | 650–849 | 強烈指向，但有一個環節依賴推斷 |
 | 450–649 | 合理假設，多個可能根因，信心不足以直接行動 |
 | < 450 | 符號不足或 dump 不完整，建議先補充資料 |
+
+### 8-F. 對人解釋品質檢查（Human Explanation Quality Gate）
+
+在輸出最終報告前，必須自我檢查以下問題。若任一題回答為「否」，就重寫白話版：
+
+1. 不懂 WinDbg 的人，能否在 30 秒內知道「是先卡死，還是先藍屏」？
+2. 不懂 IRP / DPC / filter 的人，能否知道「誰在拖慢系統」？
+3. 讀者能否分清楚「已證明的事」和「高度懷疑的事」？
+4. 白話版是否明確說出「不是什麼」？
+5. 白話版是否避免只是在重複 stack function 名稱？
+
+建議最後用以下模板收尾：
+
+```
+[BOTTOM LINE]
+已證明：<具體已證明事項>
+高度懷疑：<最可疑元件>
+尚未直接證明：<仍需 ETW / verifier / repro 才能封閉的最後一段>
+```
 
 ---
 

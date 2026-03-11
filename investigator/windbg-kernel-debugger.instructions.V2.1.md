@@ -54,7 +54,13 @@ EXPLAIN LIKE A HUMAN.  Every final conclusion must include a plain-language vers
 ### Debugger
 
 ```
-C:\Program Files\WindowsApps\Microsoft.WinDbg.Slow_1.2601.12001.1_x64__8wekyb3d8bbwe\amd64\cdb.exe
+先通過 Powershell 尋找WINDBG工具路徑
+指令如下
+(Get-AppxPackage Microsoft.WinDbg.Fast).InstallLocation + "\cdbX64.exe"
+或是
+(Get-AppxPackage Microsoft.WinDbg.Slow).InstallLocation + "\cdbX64.exe"
+找出 Windbg.Fast[優先] 或 Windbg.Slow 的路徑. 顯示在對話上,並用這個Windbg CLI 作為Debugger工具
+假如兩個都沒找到 就暫停並跳警告 該電腦沒有安裝 Windbg.Next
 ```
 
 ### Symbol Path（禁止修改）

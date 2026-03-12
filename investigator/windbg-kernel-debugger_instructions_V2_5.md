@@ -8,7 +8,7 @@ applyTo: "**"
   Internal reasoning, commands, and evidence fields remain in English.
 -->
 
-# Windows Kernel Dump — Autonomous Root Cause Investigation Engine v2.3
+# Windows Kernel Dump — Autonomous Root Cause Investigation Engine v2.5
 
 ---
 
@@ -73,10 +73,11 @@ EXPLAIN LIKE A HUMAN.  Every final conclusion must include a plain-language vers
 **正確範本：**
 
 ```powershell
+# $dumpPath 從使用者對話擷取，例如 'D:\TEMP\WINDBG\5395227\MEMORY.DMP'
+$dumpPath = '<從對話擷取>'
 $dbg  = (Get-AppxPackage Microsoft.WinDbg.Fast).InstallLocation + "\amd64\cdb.exe"
-$dump = 'D:\TEMP\WINDBG\ERIC\MEMORY.DMP'
 $sym  = 'srv*C:\symbols*http://symweb;srv*C:\symbols*https://msdl.microsoft.com/download/symbols;srv*C:\symbols*\\desmo\release\Symbols;srv*C:\symbols*https://artifacts.dev.azure.com/msftdevices/_apis/symbol/symsrv;srv*C:\symbols*\\desmo\WDS\Devices\Tinos\SWFW\Symbols;srv*C:\symbols*\\desmo\release\UEFI-Intel\Symbols'
-& $dbg -y $sym -z $dump -c ".sympath; .chain; vertarget; q"
+& $dbg -y $sym -z $dumpPath -c ".sympath; .chain; vertarget; q"
 ```
 
 | 參數 | 正確 | 錯誤 |
@@ -99,10 +100,31 @@ srv*C:\symbols*\\desmo\release\UEFI-Intel\Symbols
 ### Dump 路徑
 
 ```
-D:\TEMP\WINDBG\MEMORY.DMP
+MEMORY.DMP 路徑來源：從使用者的對話訊息中擷取，不可 hardcode。
+
+使用者通常會說：
+  「通過 WINDBG 分析 D:\TEMP\WINDBG\5395227\MEMORY.DMP」
+  「分析 D:\TEMP\WINDBG\5395227\MEMORY.DMP」
+  「幫我看這個 dump：D:\TEMP\WINDBG\5395227\MEMORY.DMP」
+  或直接貼上路徑
+
+→ 從對話中識別出完整的 .DMP 檔案路徑
+→ 若對話中有多個 .DMP 路徑，取最後一個（最新提及的）
+→ 若完全找不到 → 主動詢問：「請提供 MEMORY.DMP 的完整路徑」，不可自行假設
 ```
 
 > 若同目錄存在多個 .dmp 檔案，自動啟用 **Multi-Dump Correlation Mode**（Phase 7）。
+
+**路徑擷取後，立即套用至啟動指令：**
+
+```powershell
+# $dumpPath 從使用者對話擷取
+$dumpPath = '<從對話擷取的完整 .DMP 路徑>'
+$dumpDir  = Split-Path $dumpPath -Parent
+$dbg      = (Get-AppxPackage Microsoft.WinDbg.Fast).InstallLocation + "\amd64\cdb.exe"
+$sym      = 'srv*C:\symbols*http://symweb;srv*C:\symbols*https://msdl.microsoft.com/download/symbols;srv*C:\symbols*\\desmo\release\Symbols;srv*C:\symbols*https://artifacts.dev.azure.com/msftdevices/_apis/symbol/symsrv;srv*C:\symbols*\\desmo\WDS\Devices\Tinos\SWFW\Symbols;srv*C:\symbols*\\desmo\release\UEFI-Intel\Symbols'
+& $dbg -y $sym -z $dumpPath -c ".sympath; .chain; vertarget; q"
+```
 
 ### 輸出目錄
 
@@ -1151,6 +1173,259 @@ Gaps       : <如果有哪些資訊缺失，獲得後信心分數會提升到多
 
 ---
 
+## PHASE 8.5 — WinDbgX GUI 驗證指引（Root Cause Verification Playbook）
+
+**目的：** 根據 Phase 8 宣告的根因，提供一份工程師可以直接在 **WinDbgX GUI** 介面上操作、逐步驗證根因的完整指令清單。
+
+**觸發條件：** Phase 8 完成後，**無論信心分數高低，必須輸出此段**。
+
+---
+
+### 強制輸出格式
+
+每個根因類型都必須產生以下三個區塊，**順序固定，不可省略任何一個**：
+
+```
+[PHASE 8.5 - WINDBGX VERIFICATION PLAYBOOK]
+
+Root Cause Summary : <一句話複述 Phase 8 根因>
+Dump Path          : <使用者提供的 MEMORY.DMP 路徑>
+Confidence         : <信心分數>/1000
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 — 開啟 Dump 並設定環境
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+操作方式：
+  1. 開啟 WinDbgX（從開始選單搜尋 WinDbg）
+  2. 點選 File → Open dump file
+  3. 選擇 <MEMORY.DMP 路徑>
+  4. 等待 Kernel Symbols 載入完成（進度條消失）
+
+在 WinDbgX 命令列（Command 視窗）輸入：
+  .sympath srv*C:\symbols*https://msdl.microsoft.com/download/symbols
+  .reload /f
+  vertarget
+
+預期結果：
+  - vertarget 顯示正確 OS 版本與 dump 時間
+  - 無 *** ERROR 符號錯誤（若有，執行 !sym noisy 查看符號載入狀況）
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2 — 快速確認根因起點
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+在命令列輸入：
+  !analyze -v
+
+關注以下欄位（對照 Phase 8 結論）：
+  - FAILURE_BUCKET_ID  : 應與 Phase 8 分類一致
+  - FAULTING_MODULE    : 應與 Phase 8 嫌疑 driver 一致
+  - BLOCKING_THREAD    : <Phase 8 識別的 blocking thread address>
+  - STACK_TEXT         : 應能看到 <Phase 8 關鍵 stack frame>
+
+如果一致 → 繼續 STEP 3
+如果不一致 → 記錄差異，回到 Phase 5 重新假設
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3 — 驗證 Wait Chain（核心驗證）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<根據 Phase 8 根因類型，填入對應的具體指令序列，見下方「類型專用指令集」>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 4 — 確認 Root Blocker
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<根據 Phase 8 宣告的 root blocker，給出驗證其狀態的指令>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 5 — 最終比對結論
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Verification Result : CONFIRMED / PARTIAL / MISMATCH
+Mismatch Details    : <若有不一致，說明哪裡不同>
+Next Action         : <CONFIRMED → 進入 Phase 9 | MISMATCH → 說明需重新哪個 Phase>
+```
+
+---
+
+### 類型專用指令集（STEP 3 填入內容）
+
+根據 Phase 1 分類，STEP 3 必須填入對應的完整指令序列：
+
+---
+
+#### HANG / DEADLOCK 類型
+
+```
+STEP 3 指令序列（在 WinDbgX 命令列依序輸入）：
+
+① 找出所有 blocked thread
+   !stacks 2
+   → 關注：WrResource / WrMutex / WrAlertByThreadId
+
+② 切換到 Phase 8 識別的 blocking thread
+   .thread <Phase 8 的 blocking thread address>
+   k
+   → 應看到：<Phase 8 描述的 stack frame，例如 ntfs!NtfsAcquireResourceExclusive>
+
+③ 找出該 thread 持有的鎖
+   !thread <blocking thread address> f
+   → 關注 KernelApcDisable、WaitBlockList
+
+④ 查鎖的持有者
+   !locks
+   → 應看到：<Phase 8 的 lock address> 由 <blocking thread> 持有
+
+⑤ 追蹤 Wait Chain 第一層
+   dt nt!_ETHREAD <blocking thread> Tcb.WaitBlockList
+   → 繼續展開直到找到 root blocker（無人等待的最頂層 thread 或 object）
+
+⑥ 確認 root blocker thread 的 stack
+   .thread <root blocker address>
+   k
+   → 應看到：<Phase 8 宣告的 root cause stack，例如驅動等待 I/O completion>
+```
+
+---
+
+#### BSOD / CRASH 類型
+
+```
+STEP 3 指令序列：
+
+① 確認 bugcheck 參數
+   .bugcheck
+   → 應看到：<Phase 8 的 BUGCHECK_CODE> 與 <4 個參數值>
+
+② 切換到 faulting thread
+   .thread <FAILURE_IMAGE 的 owning thread>
+   k
+   → 應看到：<Phase 8 識別的 crash stack>
+
+③ 若為 MEMORY_CORRUPTION（0x50 / 0xC5 / 0x1A）
+   !pte <bugcheck 第一個參數（faulting VA）>
+   → 確認 PTE 狀態（Not Present / Guard Page / Kernel only）
+
+   !pool <faulting address>
+   → 確認 pool tag 歸屬（對照 Phase 8 的嫌疑 driver）
+
+④ 若為 DPC_WATCHDOG (0x133)
+   !pcr 0
+   !dpcs
+   → 應看到：<Phase 8 識別的長時間 DPC routine>
+
+⑤ 確認 faulting module
+   lm vm <Phase 8 嫌疑 driver 名稱>
+   → 確認版本號與時間戳記，記錄供後續更新參考
+```
+
+---
+
+#### POWER_IRP_BLOCK / STORAGE_TIMEOUT 類型
+
+```
+STEP 3 指令序列：
+
+① 找到卡住的 IRP
+   !irpfind
+   → 關注 Age（秒數）最大的 IRP，應與 Phase 8 描述一致
+
+② 展開卡住 IRP 的 stack
+   !irp <Phase 8 的 IRP address>
+   → 確認 IRP Stack Location 停在哪個驅動層
+
+③ 確認目標裝置
+   !devobj <IRP 的 DeviceObject>
+   !devstack <Phase 8 的 device address>
+   → 應看到：<Phase 8 嫌疑驅動在 device stack 中的位置>
+
+④ 電源 IRP 專用
+   !poaction
+   → 確認目前電源狀態機卡在哪個 phase（應與 Phase 8 一致）
+```
+
+---
+
+#### DPC_STARVATION 類型
+
+```
+STEP 3 指令序列：
+
+① 確認 DPC watchdog 觸發
+   .bugcheck
+   → 應看到：0x133 DPC_WATCHDOG_VIOLATION
+
+② 找長時間執行的 DPC
+   !dpcs
+   → 關注 DpcRoutine 指向 <Phase 8 嫌疑驅動>
+
+③ 逐 CPU 確認
+   !pcr 0
+   !pcr 1
+   （依 CPU 核心數重複）
+   → 確認哪個 CPU 的 DPC queue 被堵住
+
+④ 反查 DPC 所屬驅動
+   ln <DpcRoutine address>
+   → 應解析到 <Phase 8 嫌疑驅動>!<函數名稱>
+```
+
+---
+
+#### FILESYSTEM_HANG 類型
+
+```
+STEP 3 指令序列：
+
+① 查 MUP 卡住的 IRP
+   !mupirps
+   → 應看到 <Phase 8 描述的 UNC 路徑或網路 IRP>
+
+② 查 NTFS thread
+   !stacks 0 ntfs
+   → 應看到 <Phase 8 識別的 NTFS stack>
+
+③ 查 minifilter
+   !fltkd.filters
+   → 確認 <Phase 8 嫌疑的 filter driver> 在 frame 中
+
+④ 展開 filter 的 callback
+   !fltkd.cbdq <filter 的 callback data queue address>
+   → 確認是否有卡住的 callback
+```
+
+---
+
+### WinDbgX GUI 操作提示
+
+```
+[GUI 操作備忘]
+
+切換 thread 並查 stack：
+  左側 Locals 視窗 → 右鍵 Thread → "Set as Current Thread"
+  或在命令列：.thread <address>; k
+
+查看記憶體內容：
+  命令列：db <address>     ← 顯示 hex + ASCII
+  命令列：du <address>     ← 顯示 Unicode 字串
+  或使用 View → Memory 開啟記憶體視窗，輸入位址
+
+查看 Call Stack：
+  View → Call Stack（或 Alt+6）
+  勾選 "Show Addresses"、"Show Source Line"
+
+在 Stack Frame 中跳到原始碼：
+  雙擊 stack frame → 自動跳到對應原始碼或反組譯
+
+搜尋模組：
+  View → Modules（或 lm 命令）
+  右鍵模組 → "Reload Symbols"
+
+儲存 session 輸出：
+  .logopen D:\TEMP\WINDBG\<session_name>.txt
+  （執行完所有指令後）
+  .logclose
+```
+
+---
+
 ## PHASE 9 — Driver Verifier 與後續行動建議
 
 **觸發條件：** Phase 6 中任何 driver score ≥ 70
@@ -1507,6 +1782,8 @@ Classification: <type>
 
 --- PHASE 8: ROOT CAUSE DECLARATION ---
 
+--- PHASE 8.5: WINDBGX VERIFICATION PLAYBOOK ---
+
 --- PHASE 9: ACTION PLAN ---
 
 === END OF TRACE ===
@@ -1788,6 +2065,10 @@ MUST DO
   ✅ 執行耗時指令前，輸出 [EXECUTING] 狀態訊息（含原因與預估時間）
   ✅ 耗時指令完成後，立即輸出 [DONE] 與一行摘要
   ✅ 耗時指令超過預估上限仍未回應時，輸出 [WAITING] 告知使用者繼續等候
+  ✅ 每次分析開始前，必須從使用者對話中擷取 MEMORY.DMP 的完整路徑
+  ✅ 找不到 .DMP 路徑時，主動詢問使用者，不可自行假設
+  ✅ Phase 8 完成後，無論信心分數高低，必須輸出 Phase 8.5 WinDbgX 驗證指引
+  ✅ Phase 8.5 的類型專用指令集必須根據 Phase 1 分類填入正確內容，不可使用通用佔位符
 
 MUST NOT DO
   ❌ 不盲目執行指令（每條都需要假設）
@@ -1805,4 +2086,6 @@ MUST NOT DO
       串接會導致後續指令被誤解析為 symbol path 字串）
   ❌ 不在 PowerShell 啟動 cdb.exe 時，將 -c 參數的指令字串用單引號包住
      （單引號使 PS 把分號解析為 PS 指令分隔符，導致 -c 只收到第一條指令）
+  ❌ 不自行假設或 hardcode MEMORY.DMP 路徑 — 必須從使用者對話中擷取
+     （每個 case 路徑不同，hardcode 會分析到錯誤的 dump 檔案）
 ```

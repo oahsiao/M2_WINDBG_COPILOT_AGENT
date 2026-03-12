@@ -8,7 +8,7 @@ applyTo: "**"
   Internal reasoning, commands, and evidence fields remain in English.
 -->
 
-# Windows Kernel Dump — Autonomous Root Cause Investigation Engine v2
+# Windows Kernel Dump — Autonomous Root Cause Investigation Engine v2.3
 
 ---
 
@@ -63,6 +63,28 @@ EXPLAIN LIKE A HUMAN.  Every final conclusion must include a plain-language vers
 假如兩個都沒找到 就暫停並跳警告 該電腦沒有安裝 Windbg.Next
 ```
 
+### PowerShell 啟動 cdb.exe 規則（禁止違反）
+
+> ⚠️ **`-c` 參數的指令字串必須用雙引號 `"..."` 包住，絕對不可用單引號 `'...'`。**
+>
+> 原因：PowerShell 中單引號會導致分號 `;` 被解析為 **PowerShell 指令分隔符**，
+> 使 `-c` 只拿到第一條指令，後續指令全部脫逸成 PowerShell 指令並報錯。
+
+**正確範本：**
+
+```powershell
+$dbg  = (Get-AppxPackage Microsoft.WinDbg.Fast).InstallLocation + "\amd64\cdb.exe"
+$dump = 'D:\TEMP\WINDBG\ERIC\MEMORY.DMP'
+$sym  = 'srv*C:\symbols*http://symweb;srv*C:\symbols*https://msdl.microsoft.com/download/symbols;srv*C:\symbols*\\desmo\release\Symbols;srv*C:\symbols*https://artifacts.dev.azure.com/msftdevices/_apis/symbol/symsrv;srv*C:\symbols*\\desmo\WDS\Devices\Tinos\SWFW\Symbols;srv*C:\symbols*\\desmo\release\UEFI-Intel\Symbols'
+& $dbg -y $sym -z $dump -c ".sympath; .chain; vertarget; q"
+```
+
+| 參數 | 正確 | 錯誤 |
+|---|---|---|
+| `-c` 指令字串 | `-c ".sympath; .chain; vertarget; q"` | `-c '.sympath; .chain; vertarget; q'` |
+| `$sym` symbol path | 用單引號 `'...'`（純字串，不展開變數） | 用雙引號（會意外展開 `$` 符號） |
+| `-c` 多條指令 | 雙引號內用分號分隔 | 每條指令用 PS 分號分開呼叫 |
+
 ### Symbol Path（禁止修改）
 
 ```
@@ -107,6 +129,48 @@ D:\TEMP\WINDBG\ERIC\MEMORY.DMP
 
 ---
 
+## 耗時指令警示 / SLOW COMMAND PROTOCOL
+
+執行以下指令前，**必須先輸出 [EXECUTING] 狀態訊息**，指令完成後立即輸出 [DONE]：
+
+| 指令 | 預估耗時 | 原因 |
+|---|---|---|
+| `.reload /f` | 30s ～ 5min | 強制下載所有符號，視 symbol cache 狀況 |
+| `!analyze -v` | 20s ～ 3min | 完整自動分析，需解析大量符號 |
+| `!stacks 2` | 10s ～ 2min | 展開所有 thread 堆疊 |
+| `!process 0 0` | 5s ～ 1min | 全 process 列舉 |
+| `!process 0 1` | 1min ～ 10min | 完整 process + thread 資訊，**禁止使用**（見 Phase 2 說明） |
+| `!irpfind` | 10s ～ 2min | 全系統 IRP 搜尋 |
+| `lm t n` | 5s ～ 30s | 所有模組清單 |
+| `!poolused` | 30s ～ 5min | Pool 統計，視記憶體大小而定 |
+| `!vm` | 5s ～ 1min | 虛擬記憶體統計 |
+| `!blackboxbsd` / `!blackboxntfs` / `!blackboxpnp` | 5s ～ 30s each | BlackBox 資料解析 |
+
+### 必要格式
+
+每次執行耗時指令前，輸出：
+
+```
+[EXECUTING] <指令名稱>
+原因：<為什麼要跑這條指令、假設依據>
+預計耗時：<參考上表>
+請稍候，勿中斷...
+```
+
+指令完成後，立即輸出：
+
+```
+[DONE] <指令名稱> — <一行摘要：成功 / 部分失敗 / 關鍵發現>
+```
+
+若指令執行超過預估上限仍未回應，輸出：
+
+```
+[WAITING] <指令名稱> — 已超過預估時間，仍在執行中，請繼續等候...
+```
+
+---
+
 ## 停止條件 / STOP CONDITIONS
 
 滿足以下任一條件即停止迴圈：
@@ -140,6 +204,7 @@ Current Hypothesis : <描述>
 Last Round Finding : <新發現摘要>
 This Round Goal    : <預期找到什麼>
 Commands Remaining : <250 - 已用數量>
+Progress Estimate  : Phase <X> / 9 — 預計還需 <N> 輪收斂
 ```
 
 ---
@@ -150,10 +215,19 @@ Commands Remaining : <250 - 已用數量>
 
 ### 步驟 0-1：基本驗證
 
+> ⚠️ **嚴重限制：`.symfix` 與 `.sympath` 必須單獨執行，絕對不可與其他指令用分號 `;` 串接。**
+> 原因：`.sympath` 語法中，分號是 **symbol path 的路徑分隔符**，不是指令分隔符。
+> 若串接，後面的 `.chain`、`vertarget` 等指令會被誤解析為 symbol path 字串，導致錯誤：
+> `Error: Execute .sympath(+) command attempts to access 'vertarget' failed`
+
+**正確執行順序（每條指令獨立執行，不串接）：**
+
 ```
-.sympath
-.chain
-vertarget
+1. .symfix
+2. .sympath srv*C:\symbols*http://symweb;srv*C:\symbols*https://msdl.microsoft.com/download/symbols;srv*C:\symbols*\\desmo\release\Symbols;srv*C:\symbols*https://artifacts.dev.azure.com/msftdevices/_apis/symbol/symsrv;srv*C:\symbols*\\desmo\WDS\Devices\Tinos\SWFW\Symbols;srv*C:\symbols*\\desmo\release\UEFI-Intel\Symbols
+3. .sympath
+4. .chain
+5. vertarget
 ```
 
 ### 步驟 0-2：Dump 類型判定
@@ -198,7 +272,7 @@ Status      : READY / BLOCKED
 !analyze -v
 ```
 
-> `.reload /f` 可能很慢，**必須等待完成**，不可中斷。
+> ⚠️ **耗時警告：** `.reload /f` 需等待符號下載完成，**必須先輸出 [EXECUTING]，完成後輸出 [DONE]**，不可中斷。`!analyze -v` 同樣適用。
 
 **Fast Path 判斷：** 如果 `!analyze -v` 的輸出已包含：
 - 明確的 `FAILURE_BUCKET_ID`
@@ -1706,11 +1780,14 @@ MUST DO
   ✅ 根因宣告必須包含「排除說明」
   ✅ 根因必須解釋「為何無法恢復」
   ✅ 用繁體中文與使用者溝通
-  ✅ 每輪 loop 開頭輸出 [LOOP ROUND #N] 狀態
+  ✅ 每輪 loop 開頭輸出 [LOOP ROUND #N] 狀態（含 Progress Estimate）
   ✅ 若 !analyze -v 已有完整答案，使用 fast path
   ✅ MEMORY_CORRUPTION 或 symbols 缺失時，自動觸發 ASCII Artifact 掃描（附錄 B）
   ✅ 找到 ASCII artifact 後，立即記錄並更新 Phase 6 driver score
   ✅ Pool tag 必須用 !poolfind 驗證，不可直接猜測對應 driver
+  ✅ 執行耗時指令前，輸出 [EXECUTING] 狀態訊息（含原因與預估時間）
+  ✅ 耗時指令完成後，立即輸出 [DONE] 與一行摘要
+  ✅ 耗時指令超過預估上限仍未回應時，輸出 [WAITING] 告知使用者繼續等候
 
 MUST NOT DO
   ❌ 不盲目執行指令（每條都需要假設）
@@ -1723,4 +1800,9 @@ MUST NOT DO
   ❌ 不跳過「排除說明」（必須說明排除了哪些可能性）
   ❌ 不在 symbols 缺失時放棄分析 — 先嘗試 ASCII artifact 掃描
   ❌ 不把 LOW confidence 的 ASCII 片段直接當作確定證據
+  ❌ 不將 .symfix / .sympath 與其他指令用分號串接執行
+     （分號在 .sympath 語境下是路徑分隔符，不是指令分隔符，
+      串接會導致後續指令被誤解析為 symbol path 字串）
+  ❌ 不在 PowerShell 啟動 cdb.exe 時，將 -c 參數的指令字串用單引號包住
+     （單引號使 PS 把分號解析為 PS 指令分隔符，導致 -c 只收到第一條指令）
 ```

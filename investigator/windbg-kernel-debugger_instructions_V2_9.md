@@ -102,6 +102,12 @@ EXPLAIN LIKE A HUMAN.  Every final conclusion must include a plain-language vers
 
 **檔案 1：`<dumpDir>\run_cdb.ps1`（PowerShell 啟動器）**
 
+> ⚠️ **產生此檔案前必須確認：**
+> 1. 目標路徑的 `run_cdb.ps1` 是否已存在且內容正確 → 若正確則**不需重新寫入**
+> 2. `param(...)` 區塊**全檔只能出現一次**，且必須是第一個陳述式
+> 3. 禁止把範本內容貼兩次，或在檔案結尾再附加一次 `param`
+>    （重複的 `param` 會導致 PowerShell 執行後冒出語法錯誤，雖不影響 cdb 結果，但會污染輸出）
+
 ```powershell
 # run_cdb.ps1
 param(
@@ -2278,4 +2284,11 @@ MUST NOT DO
      正確做法：Set-Content -Value $lines -Encoding UTF8（$lines 為字串陣列）
   ❌ 不自行假設或 hardcode MEMORY.DMP 路徑 — 必須從使用者對話中擷取
      （每個 case 路徑不同，hardcode 會分析到錯誤的 dump 檔案）
+  ❌ 不在 run_cdb.ps1 中重複寫入 param(...) 區塊
+     原因：PowerShell 腳本只允許一個 param 區塊，且必須是檔案的第一個陳述式；
+           若重複出現（例如把 run_cdb.ps1 範本內容貼了兩次，或在檔案末尾又加一次 param），
+           執行時會出現 "The assignment expression is not valid" 或 param 語法錯誤，
+           雖然不影響已完成的 cdb 分析結果，但會造成干擾並污染輸出記錄。
+     正確做法：run_cdb.ps1 全檔只能有一個 param 區塊，位於第一行，內容與範本完全一致，
+              產生前先確認目標路徑的 run_cdb.ps1 是否已存在，若存在且內容正確則不需重新寫入
 ```
